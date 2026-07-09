@@ -142,3 +142,61 @@ def llm_call(
 def clear_cache():
     _response_cache.clear()
     tracker.reset()
+
+
+# ── Per-route snapshot / delta helpers ────────────────────────────────────────
+
+def snapshot_tracker() -> Dict[str, Any]:
+    """Capture a point-in-time snapshot of the global tracker counters."""
+    return {
+        "api_calls":           tracker.api_calls,
+        "cache_hits":          tracker.cache_hits,
+        "total_input_tokens":  tracker.total_input_tokens,
+        "total_output_tokens": tracker.total_output_tokens,
+        "total_cost_usd":      tracker.total_cost_usd,
+    }
+
+
+def delta_from_snapshot(before: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the difference between current tracker state and a prior snapshot."""
+    return {
+        "api_calls":           tracker.api_calls           - before["api_calls"],
+        "cache_hits":          tracker.cache_hits           - before["cache_hits"],
+        "total_input_tokens":  tracker.total_input_tokens  - before["total_input_tokens"],
+        "total_output_tokens": tracker.total_output_tokens - before["total_output_tokens"],
+        "total_cost_usd":      tracker.total_cost_usd      - before["total_cost_usd"],
+    }
+
+
+def llm_call_uncached(
+    prompt: str,
+    max_tokens: int = 800,
+) -> Tuple[str, int, int]:
+    """
+    Direct LLM call that bypasses ALL caching layers.
+    Returns (response_text, input_tokens, output_tokens).
+    Used exclusively by the unoptimized route to ensure zero cache benefit.
+    """
+    try:
+        import os as _os
+        _proxy_backup = {}
+        for _k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+            if _k in _os.environ:
+                _proxy_backup[_k] = _os.environ.pop(_k)
+        client = openai.OpenAI(api_key=_os.getenv("OPENAI_API_KEY"))
+        resp = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            max_tokens=max_tokens,
+        )
+        response = resp.choices[0].message.content or ""
+    except Exception as e:
+        response = f"[LLM_ERROR: {e}]"
+    finally:
+        for _k, _v in _proxy_backup.items():
+            _os.environ[_k] = _v
+
+    inp = _count_tokens(prompt)
+    out = _count_tokens(response)
+    return response, inp, out

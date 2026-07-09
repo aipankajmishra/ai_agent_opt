@@ -1,9 +1,13 @@
 """
-Claims submitted for processing.
+Claims submitted for processing (30 claims across 12 patients).
 ML risk model triage:
   - AUTO_APPROVE  → processed immediately, no LLM involved
   - AUTO_DENY     → immediate denial, no LLM involved
-  - NEEDS_REVIEW  → LangGraph agent prepares full analyst package
+  - NEEDS_REVIEW  → full HITL pipeline runs
+
+Claims are processed sequentially in a single pass.
+Caches accumulate naturally — same-patient claims benefit from
+LRU document cache, semantic brief cache, and context prefix cache.
 """
 
 from __future__ import annotations
@@ -11,20 +15,23 @@ from typing import Dict, Any, Optional
 
 CLAIMS: Dict[str, Dict[str, Any]] = {
 
-    # ── C001: NEEDS_REVIEW – knee surgery, amount above network average ──────
+    # ══════════════════════════════════════════════════════════════════════════
+    # P001 — John Doe (52M, knee OA, HTN) — 3 claims
+    # ══════════════════════════════════════════════════════════════════════════
+
     "C001": {
         "claim_id": "C001",
         "patient_id": "P001",
         "member_name": "John Doe",
         "date": "2026-07-01",
         "provider": "Metro Orthopedic Associates",
-        "provider_in_network": False,   # out-of-network flag
+        "provider_in_network": False,
         "procedure": "Knee Arthroscopy with Meniscectomy",
         "procedure_key": "knee_arthroscopy",
         "diagnosis": "Medial Meniscus Tear + Knee Osteoarthritis",
         "icd10": ["M23.201", "M17.11"],
         "billed_amount": 12500.00,
-        "approved_amount": 8900.00,    # network rate
+        "approved_amount": 8900.00,
         "member_avg_cost": 5400.00,
         "diagnosis_risk_score": 0.45,
         "provider_reliability_score": 0.80,
@@ -33,7 +40,52 @@ CLAIMS: Dict[str, Dict[str, Any]] = {
         "status": "pending",
     },
 
-    # ── C002: AUTO_APPROVE – routine annual wellness ─────────────────────────
+    "C006": {
+        "claim_id": "C006",
+        "patient_id": "P001",
+        "member_name": "John Doe",
+        "date": "2026-07-09",
+        "provider": "Metro Orthopedic Associates",
+        "provider_in_network": False,
+        "procedure": "Post-Operative Complication Visit",
+        "procedure_key": "knee_arthroscopy",
+        "diagnosis": "Post-surgical joint effusion – right knee",
+        "icd10": ["M79.821", "Z96.651"],
+        "billed_amount": 2400.00,
+        "approved_amount": 1800.00,
+        "member_avg_cost": 5400.00,
+        "diagnosis_risk_score": 0.35,
+        "provider_reliability_score": 0.80,
+        "procedure_code_valid": True,
+        "description": "Follow-up for post-operative right knee effusion; aspiration",
+        "status": "pending",
+    },
+
+    "C007": {
+        "claim_id": "C007",
+        "patient_id": "P001",
+        "member_name": "John Doe",
+        "date": "2026-08-01",
+        "provider": "Metropolitan PT Center",
+        "provider_in_network": True,
+        "procedure": "Post-Operative Knee Physical Therapy (12 sessions)",
+        "procedure_key": "pt_knee_rehab",
+        "diagnosis": "Post-arthroscopic rehabilitation – right knee",
+        "icd10": ["Z96.651", "M17.11"],
+        "billed_amount": 2900.00,
+        "approved_amount": 2400.00,
+        "member_avg_cost": 5400.00,
+        "diagnosis_risk_score": 0.15,
+        "provider_reliability_score": 0.92,
+        "procedure_code_valid": True,
+        "description": "Post-operative knee rehabilitation – 12 sessions over 6 weeks",
+        "status": "pending",
+    },
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # P002 — Mary Johnson (35F, healthy) — 2 claims
+    # ══════════════════════════════════════════════════════════════════════════
+
     "C002": {
         "claim_id": "C002",
         "patient_id": "P002",
@@ -55,7 +107,31 @@ CLAIMS: Dict[str, Dict[str, Any]] = {
         "status": "pending",
     },
 
-    # ── C003: NEEDS_REVIEW – chemotherapy cycle, high amount ─────────────────
+    "C026": {
+        "claim_id": "C026",
+        "patient_id": "P002",
+        "member_name": "Mary Johnson",
+        "date": "2026-09-15",
+        "provider": "Dermatology Associates",
+        "provider_in_network": True,
+        "procedure": "Excision of Suspicious Skin Lesion – Back",
+        "procedure_key": "dermatology_excision",
+        "diagnosis": "Atypical melanocytic nevus – moderate atypia",
+        "icd10": ["D22.5", "D48.5"],
+        "billed_amount": 1850.00,
+        "approved_amount": 1450.00,
+        "member_avg_cost": 350.00,
+        "diagnosis_risk_score": 0.40,
+        "provider_reliability_score": 0.93,
+        "procedure_code_valid": True,
+        "description": "Excisional biopsy of suspicious 8mm pigmented lesion, mid-back",
+        "status": "pending",
+    },
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # P003 — Michael Chen (61M, NHL, T2DM) — 3 claims
+    # ══════════════════════════════════════════════════════════════════════════
+
     "C003": {
         "claim_id": "C003",
         "patient_id": "P003",
@@ -69,15 +145,60 @@ CLAIMS: Dict[str, Dict[str, Any]] = {
         "icd10": ["C83.30"],
         "billed_amount": 28400.00,
         "approved_amount": 24000.00,
-        "member_avg_cost": 24000.00,   # consistent with prior cycles
-        "diagnosis_risk_score": 0.90,  # high-cost oncology always needs review
+        "member_avg_cost": 24000.00,
+        "diagnosis_risk_score": 0.90,
         "provider_reliability_score": 0.95,
         "procedure_code_valid": True,
         "description": "Cycle 3 of 6 R-CHOP: Rituximab, Cyclophosphamide, Doxorubicin, Vincristine, Prednisone",
         "status": "pending",
     },
 
-    # ── C004: NEEDS_REVIEW – complex spine surgery, highest cost ─────────────
+    "C008": {
+        "claim_id": "C008",
+        "patient_id": "P003",
+        "member_name": "Michael Chen",
+        "date": "2026-07-20",
+        "provider": "City Imaging Center",
+        "provider_in_network": True,
+        "procedure": "Interim PET/CT Scan – Lymphoma Response Assessment",
+        "procedure_key": "interim_pet_ct",
+        "diagnosis": "Non-Hodgkin Lymphoma – DLBCL Stage IIIA – on treatment",
+        "icd10": ["C83.30", "Z08"],
+        "billed_amount": 8500.00,
+        "approved_amount": 7200.00,
+        "member_avg_cost": 24000.00,
+        "diagnosis_risk_score": 0.55,
+        "provider_reliability_score": 0.90,
+        "procedure_code_valid": True,
+        "description": "Interim PET/CT after Cycle 3 to assess metabolic response",
+        "status": "pending",
+    },
+
+    "C009": {
+        "claim_id": "C009",
+        "patient_id": "P003",
+        "member_name": "Michael Chen",
+        "date": "2026-08-10",
+        "provider": "City Cancer Center",
+        "provider_in_network": True,
+        "procedure": "R-CHOP Chemotherapy Cycle 4",
+        "procedure_key": "chemotherapy_rchop",
+        "diagnosis": "Non-Hodgkin Lymphoma – DLBCL Stage IIIA – ongoing treatment",
+        "icd10": ["C83.30"],
+        "billed_amount": 27500.00,
+        "approved_amount": 24000.00,
+        "member_avg_cost": 24000.00,
+        "diagnosis_risk_score": 0.75,
+        "provider_reliability_score": 0.95,
+        "procedure_code_valid": True,
+        "description": "Cycle 4 of 6 R-CHOP – continued complete metabolic response per interim PET",
+        "status": "pending",
+    },
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # P004 — Sarah Williams (38F, lumbar DDD, radiculopathy) — 2 claims
+    # ══════════════════════════════════════════════════════════════════════════
+
     "C004": {
         "claim_id": "C004",
         "patient_id": "P004",
@@ -91,7 +212,7 @@ CLAIMS: Dict[str, Dict[str, Any]] = {
         "icd10": ["M47.816", "M43.16", "M54.4"],
         "billed_amount": 67200.00,
         "approved_amount": 52000.00,
-        "member_avg_cost": 8500.00,    # 7.9× member average → high flag
+        "member_avg_cost": 8500.00,
         "diagnosis_risk_score": 0.65,
         "provider_reliability_score": 0.90,
         "procedure_code_valid": True,
@@ -99,7 +220,31 @@ CLAIMS: Dict[str, Dict[str, Any]] = {
         "status": "pending",
     },
 
-    # ── C005: AUTO_APPROVE – emergency appendectomy ──────────────────────────
+    "C010": {
+        "claim_id": "C010",
+        "patient_id": "P004",
+        "member_name": "Sarah Williams",
+        "date": "2026-09-01",
+        "provider": "Regional Spine Center",
+        "provider_in_network": True,
+        "procedure": "Post-Operative Spine Follow-Up & X-ray",
+        "procedure_key": "post_spine_followup",
+        "diagnosis": "Status post L4-S1 fusion – routine healing assessment",
+        "icd10": ["Z48.811", "M47.816"],
+        "billed_amount": 680.00,
+        "approved_amount": 520.00,
+        "member_avg_cost": 8500.00,
+        "diagnosis_risk_score": 0.15,
+        "provider_reliability_score": 0.90,
+        "procedure_code_valid": True,
+        "description": "6-week post-operative follow-up with lumbar X-ray to assess fusion progression",
+        "status": "pending",
+    },
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # P005 — Robert Davis (27M, healthy) — 2 claims
+    # ══════════════════════════════════════════════════════════════════════════
+
     "C005": {
         "claim_id": "C005",
         "patient_id": "P005",
@@ -112,34 +257,439 @@ CLAIMS: Dict[str, Dict[str, Any]] = {
         "diagnosis": "Acute Appendicitis",
         "icd10": ["K37"],
         "billed_amount": 8900.00,
-        "approved_amount": 9200.00,   # within expected range
+        "approved_amount": 9200.00,
         "member_avg_cost": 9200.00,
-        "diagnosis_risk_score": 0.15,  # emergency – retrospective auth
+        "diagnosis_risk_score": 0.15,
         "provider_reliability_score": 0.97,
         "procedure_code_valid": True,
         "description": "Emergency laparoscopic appendectomy for acute appendicitis",
         "status": "pending",
     },
 
-    # ── C006: NEEDS_REVIEW – same patient as C001, follow-up (cache-hit scenario)
-    "C006": {
-        "claim_id": "C006",
-        "patient_id": "P001",          # same patient as C001
-        "member_name": "John Doe",
-        "date": "2026-07-09",
-        "provider": "Metro Orthopedic Associates",
-        "provider_in_network": False,
-        "procedure": "Post-Operative Complication Visit",
-        "procedure_key": "knee_arthroscopy",
-        "diagnosis": "Post-surgical joint effusion – right knee",
-        "icd10": ["M79.821", "Z96.651"],
-        "billed_amount": 9800.00,
-        "approved_amount": 5500.00,
-        "member_avg_cost": 5400.00,
-        "diagnosis_risk_score": 0.65,
-        "provider_reliability_score": 0.80,
+    "C027": {
+        "claim_id": "C027",
+        "patient_id": "P005",
+        "member_name": "Robert Davis",
+        "date": "2026-09-20",
+        "provider": "City General Hospital – ER",
+        "provider_in_network": True,
+        "procedure": "ER Visit – Abdominal Pain",
+        "procedure_key": "er_visit",
+        "diagnosis": "Acute gastroenteritis – suspected viral",
+        "icd10": ["A09", "R10.9"],
+        "billed_amount": 3200.00,
+        "approved_amount": 2600.00,
+        "member_avg_cost": 9200.00,
+        "diagnosis_risk_score": 0.20,
+        "provider_reliability_score": 0.97,
         "procedure_code_valid": True,
-        "description": "Follow-up for post-operative right knee effusion; aspiration and steroid injection",
+        "description": "ER visit – abdominal pain, nausea, diarrhea x 2 days; CT abdomen negative",
+        "status": "pending",
+    },
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # P006 — Lisa Wang (45F, T2DM, HTN, early cataracts) — 3 claims
+    # ══════════════════════════════════════════════════════════════════════════
+
+    "C011": {
+        "claim_id": "C011",
+        "patient_id": "P006",
+        "member_name": "Lisa Wang",
+        "date": "2026-07-10",
+        "provider": "Endocrinology & Diabetes Center",
+        "provider_in_network": True,
+        "procedure": "Diabetes Management Comprehensive Visit",
+        "procedure_key": "diabetes_management",
+        "diagnosis": "Type 2 Diabetes Mellitus – inadequately controlled (HbA1c 8.4%)",
+        "icd10": ["E11.65", "I10"],
+        "billed_amount": 580.00,
+        "approved_amount": 480.00,
+        "member_avg_cost": 620.00,
+        "diagnosis_risk_score": 0.40,
+        "provider_reliability_score": 0.91,
+        "procedure_code_valid": True,
+        "description": "Comprehensive diabetes visit – medication adjustment, diet review, foot exam",
+        "status": "pending",
+    },
+
+    "C012": {
+        "claim_id": "C012",
+        "patient_id": "P006",
+        "member_name": "Lisa Wang",
+        "date": "2026-08-05",
+        "provider": "Wound Care Center",
+        "provider_in_network": True,
+        "procedure": "Diabetic Foot Ulcer Debridement & Wound Care",
+        "procedure_key": "wound_care_diabetic",
+        "diagnosis": "Diabetic neuropathic foot ulcer – left plantar (Wagner Grade 1)",
+        "icd10": ["E11.621", "L97.521"],
+        "billed_amount": 3200.00,
+        "approved_amount": 2800.00,
+        "member_avg_cost": 620.00,
+        "diagnosis_risk_score": 0.55,
+        "provider_reliability_score": 0.88,
+        "procedure_code_valid": True,
+        "description": "Sharp debridement of plantar foot ulcer with advanced wound dressing application",
+        "status": "pending",
+    },
+
+    "C028": {
+        "claim_id": "C028",
+        "patient_id": "P006",
+        "member_name": "Lisa Wang",
+        "date": "2026-10-01",
+        "provider": "Vision Surgery Center",
+        "provider_in_network": True,
+        "procedure": "Phacoemulsification Cataract Surgery – Left Eye",
+        "procedure_key": "cataract_surgery",
+        "diagnosis": "Senile cataract – left eye (dense nuclear sclerotic) + diabetic ocular changes",
+        "icd10": ["H25.12", "E11.39"],
+        "billed_amount": 5800.00,
+        "approved_amount": 4200.00,
+        "member_avg_cost": 620.00,
+        "diagnosis_risk_score": 0.30,
+        "provider_reliability_score": 0.94,
+        "procedure_code_valid": True,
+        "description": "Phacoemulsification with posterior chamber IOL implantation, left eye",
+        "status": "pending",
+    },
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # P007 — James Wilson (68M, CAD s/p CABG, sleep apnea) — 3 claims
+    # ══════════════════════════════════════════════════════════════════════════
+
+    "C013": {
+        "claim_id": "C013",
+        "patient_id": "P007",
+        "member_name": "James Wilson",
+        "date": "2026-07-12",
+        "provider": "Cardiac Care Associates",
+        "provider_in_network": True,
+        "procedure": "Post-CABG Cardiology Follow-Up",
+        "procedure_key": "cardiac_followup",
+        "diagnosis": "Coronary artery disease – status post CABG x 4 (March 2026)",
+        "icd10": ["I25.10", "Z95.1"],
+        "billed_amount": 720.00,
+        "approved_amount": 580.00,
+        "member_avg_cost": 1800.00,
+        "diagnosis_risk_score": 0.35,
+        "provider_reliability_score": 0.89,
+        "procedure_code_valid": True,
+        "description": "4-month post-CABG follow-up; EKG, medication review, risk factor management",
+        "status": "pending",
+    },
+
+    "C014": {
+        "claim_id": "C014",
+        "patient_id": "P007",
+        "member_name": "James Wilson",
+        "date": "2026-07-25",
+        "provider": "Cardiac Imaging Center",
+        "provider_in_network": True,
+        "procedure": "Stress Echocardiogram",
+        "procedure_key": "stress_echocardiogram",
+        "diagnosis": "CAD – post-CABG evaluation of exertional dyspnea",
+        "icd10": ["I25.10", "R06.02", "Z95.1"],
+        "billed_amount": 3400.00,
+        "approved_amount": 2800.00,
+        "member_avg_cost": 1800.00,
+        "diagnosis_risk_score": 0.45,
+        "provider_reliability_score": 0.85,
+        "procedure_code_valid": True,
+        "description": "Dobutamine stress echocardiogram – evaluation of graft patency and LV function",
+        "status": "pending",
+    },
+
+    "C030": {
+        "claim_id": "C030",
+        "patient_id": "P007",
+        "member_name": "James Wilson",
+        "date": "2026-10-15",
+        "provider": "Sleep Disorders Center",
+        "provider_in_network": True,
+        "procedure": "Polysomnography – Sleep Study",
+        "procedure_key": "sleep_study",
+        "diagnosis": "Obstructive Sleep Apnea – suspected (BMI 34, ESS 14/24, witnessed apneas)",
+        "icd10": ["G47.33", "I25.10", "E66.9"],
+        "billed_amount": 4800.00,
+        "approved_amount": 3800.00,
+        "member_avg_cost": 1800.00,
+        "diagnosis_risk_score": 0.38,
+        "provider_reliability_score": 0.82,
+        "procedure_code_valid": True,
+        "description": "In-lab attended polysomnography with CPAP titration per AASM protocol",
+        "status": "pending",
+    },
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # P008 — Emily Rodriguez (55F, hip OA) — 2 claims
+    # ══════════════════════════════════════════════════════════════════════════
+
+    "C015": {
+        "claim_id": "C015",
+        "patient_id": "P008",
+        "member_name": "Emily Rodriguez",
+        "date": "2026-07-15",
+        "provider": "Advanced Orthopedics Center",
+        "provider_in_network": True,
+        "procedure": "Total Hip Replacement – Right",
+        "procedure_key": "hip_replacement",
+        "diagnosis": "Severe Osteoarthritis – Right Hip (Kellgren-Lawrence Grade IV)",
+        "icd10": ["M16.11"],
+        "billed_amount": 42000.00,
+        "approved_amount": 34000.00,
+        "member_avg_cost": 5200.00,
+        "diagnosis_risk_score": 0.50,
+        "provider_reliability_score": 0.88,
+        "procedure_code_valid": True,
+        "description": "Total hip arthroplasty – cementless (right), posterior approach",
+        "status": "pending",
+    },
+
+    "C016": {
+        "claim_id": "C016",
+        "patient_id": "P008",
+        "member_name": "Emily Rodriguez",
+        "date": "2026-08-20",
+        "provider": "Metropolitan PT Center",
+        "provider_in_network": True,
+        "procedure": "Post-Operative Hip Physical Therapy (10 sessions)",
+        "procedure_key": "post_hip_pt",
+        "diagnosis": "Status post right total hip arthroplasty – gait retraining",
+        "icd10": ["Z47.1", "M16.11"],
+        "billed_amount": 2600.00,
+        "approved_amount": 2100.00,
+        "member_avg_cost": 5200.00,
+        "diagnosis_risk_score": 0.12,
+        "provider_reliability_score": 0.92,
+        "procedure_code_valid": True,
+        "description": "Post-operative hip rehabilitation – 10 sessions, gait training and strengthening",
+        "status": "pending",
+    },
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # P009 — David Kim (29M, healthy) — 3 claims
+    # ══════════════════════════════════════════════════════════════════════════
+
+    "C017": {
+        "claim_id": "C017",
+        "patient_id": "P009",
+        "member_name": "David Kim",
+        "date": "2026-07-18",
+        "provider": "Downtown Primary Care",
+        "provider_in_network": True,
+        "procedure": "Annual Wellness Examination",
+        "procedure_key": "annual_wellness",
+        "diagnosis": "Preventive Care / Health Maintenance",
+        "icd10": ["Z00.00"],
+        "billed_amount": 350.00,
+        "approved_amount": 320.00,
+        "member_avg_cost": 320.00,
+        "diagnosis_risk_score": 0.02,
+        "provider_reliability_score": 0.97,
+        "procedure_code_valid": True,
+        "description": "Routine annual physical for healthy 29-year-old male",
+        "status": "pending",
+    },
+
+    "C018": {
+        "claim_id": "C018",
+        "patient_id": "P009",
+        "member_name": "David Kim",
+        "date": "2026-08-01",
+        "provider": "Downtown Primary Care",
+        "provider_in_network": True,
+        "procedure": "Routine Vaccination – Tdap + Influenza",
+        "procedure_key": "vaccination",
+        "diagnosis": "Routine immunization",
+        "icd10": ["Z23"],
+        "billed_amount": 180.00,
+        "approved_amount": 150.00,
+        "member_avg_cost": 320.00,
+        "diagnosis_risk_score": 0.01,
+        "provider_reliability_score": 0.97,
+        "procedure_code_valid": True,
+        "description": "Tdap booster + seasonal influenza vaccination, administered IM",
+        "status": "pending",
+    },
+
+    "C029": {
+        "claim_id": "C029",
+        "patient_id": "P009",
+        "member_name": "David Kim",
+        "date": "2026-10-10",
+        "provider": "Gastroenterology Associates",
+        "provider_in_network": True,
+        "procedure": "Screening Colonoscopy",
+        "procedure_key": "colonoscopy",
+        "diagnosis": "Routine colorectal cancer screening – average risk",
+        "icd10": ["Z12.11"],
+        "billed_amount": 2800.00,
+        "approved_amount": 2200.00,
+        "member_avg_cost": 320.00,
+        "diagnosis_risk_score": 0.05,
+        "provider_reliability_score": 0.95,
+        "procedure_code_valid": True,
+        "description": "Screening colonoscopy – no polyps found, normal exam, follow-up in 10 years",
+        "status": "pending",
+    },
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # P010 — Anna Martinez (72F, COPD, CHF) — 3 claims
+    # ══════════════════════════════════════════════════════════════════════════
+
+    "C019": {
+        "claim_id": "C019",
+        "patient_id": "P010",
+        "member_name": "Anna Martinez",
+        "date": "2026-07-20",
+        "provider": "City General Hospital",
+        "provider_in_network": True,
+        "procedure": "COPD Exacerbation – Inpatient Admission (3 days)",
+        "procedure_key": "copd_exacerbation",
+        "diagnosis": "Acute COPD exacerbation with respiratory failure (on 2L O2)",
+        "icd10": ["J44.1", "J96.01"],
+        "billed_amount": 18500.00,
+        "approved_amount": 15000.00,
+        "member_avg_cost": 4200.00,
+        "diagnosis_risk_score": 0.68,
+        "provider_reliability_score": 0.86,
+        "procedure_code_valid": True,
+        "description": "3-day inpatient stay – IV steroids, nebulizers, antibiotics, O2 therapy",
+        "status": "pending",
+    },
+
+    "C020": {
+        "claim_id": "C020",
+        "patient_id": "P010",
+        "member_name": "Anna Martinez",
+        "date": "2026-08-10",
+        "provider": "Cardiac Imaging Center",
+        "provider_in_network": True,
+        "procedure": "Transthoracic Echocardiogram",
+        "procedure_key": "echocardiogram",
+        "diagnosis": "Chronic systolic heart failure – post-exacerbation reassessment",
+        "icd10": ["I50.22", "J44.9"],
+        "billed_amount": 2400.00,
+        "approved_amount": 1900.00,
+        "member_avg_cost": 4200.00,
+        "diagnosis_risk_score": 0.48,
+        "provider_reliability_score": 0.85,
+        "procedure_code_valid": True,
+        "description": "TTE – evaluate LVEF post-COPD exacerbation; assess RV function and PASP",
+        "status": "pending",
+    },
+
+    "C021": {
+        "claim_id": "C021",
+        "patient_id": "P010",
+        "member_name": "Anna Martinez",
+        "date": "2026-09-05",
+        "provider": "Pulmonary & Cardiology Group",
+        "provider_in_network": True,
+        "procedure": "Complex Medication Management Visit",
+        "procedure_key": "medication_review",
+        "diagnosis": "Polypharmacy review – COPD, CHF, HTN, osteoporosis",
+        "icd10": ["Z79.899", "J44.9", "I50.22"],
+        "billed_amount": 450.00,
+        "approved_amount": 380.00,
+        "member_avg_cost": 4200.00,
+        "diagnosis_risk_score": 0.25,
+        "provider_reliability_score": 0.90,
+        "procedure_code_valid": True,
+        "description": "Medication reconciliation and optimization – 14 active medications reviewed",
+        "status": "pending",
+    },
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # P011 — Tom Baker (42M, rotator cuff tear) — 2 claims
+    # ══════════════════════════════════════════════════════════════════════════
+
+    "C022": {
+        "claim_id": "C022",
+        "patient_id": "P011",
+        "member_name": "Tom Baker",
+        "date": "2026-07-22",
+        "provider": "Sports Medicine Imaging",
+        "provider_in_network": True,
+        "procedure": "MRI Shoulder – Right (without contrast)",
+        "procedure_key": "shoulder_mri",
+        "diagnosis": "Suspected rotator cuff tear – right shoulder",
+        "icd10": ["M75.121", "S46.001A"],
+        "billed_amount": 2800.00,
+        "approved_amount": 2200.00,
+        "member_avg_cost": 1800.00,
+        "diagnosis_risk_score": 0.42,
+        "provider_reliability_score": 0.87,
+        "procedure_code_valid": True,
+        "description": "MRI right shoulder – evaluate full-thickness supraspinatus tear after acute injury",
+        "status": "pending",
+    },
+
+    "C023": {
+        "claim_id": "C023",
+        "patient_id": "P011",
+        "member_name": "Tom Baker",
+        "date": "2026-08-15",
+        "provider": "Sports Medicine Surgery Center",
+        "provider_in_network": True,
+        "procedure": "Arthroscopic Rotator Cuff Repair – Right Shoulder",
+        "procedure_key": "rotator_cuff_repair",
+        "diagnosis": "Full-thickness supraspinatus tear – right shoulder (MRI-confirmed, 2.5 cm)",
+        "icd10": ["M75.121", "S46.001D"],
+        "billed_amount": 19500.00,
+        "approved_amount": 15200.00,
+        "member_avg_cost": 1800.00,
+        "diagnosis_risk_score": 0.52,
+        "provider_reliability_score": 0.84,
+        "procedure_code_valid": True,
+        "description": "Arthroscopic double-row suture bridge rotator cuff repair, subacromial decompression",
+        "status": "pending",
+    },
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # P012 — Rachel Green (33F, pregnancy) — 2 claims
+    # ══════════════════════════════════════════════════════════════════════════
+
+    "C024": {
+        "claim_id": "C024",
+        "patient_id": "P012",
+        "member_name": "Rachel Green",
+        "date": "2026-07-25",
+        "provider": "Women's Health Center",
+        "provider_in_network": True,
+        "procedure": "Prenatal Visit – 28-week Gestation",
+        "procedure_key": "prenatal_visit",
+        "diagnosis": "Normal pregnancy – 28 weeks gestation, G1P0",
+        "icd10": ["Z34.00", "O09.511"],
+        "billed_amount": 520.00,
+        "approved_amount": 440.00,
+        "member_avg_cost": 1200.00,
+        "diagnosis_risk_score": 0.08,
+        "provider_reliability_score": 0.96,
+        "procedure_code_valid": True,
+        "description": "Routine prenatal visit – 28 weeks; GDM screening, fetal growth ultrasound normal",
+        "status": "pending",
+    },
+
+    "C025": {
+        "claim_id": "C025",
+        "patient_id": "P012",
+        "member_name": "Rachel Green",
+        "date": "2026-10-01",
+        "provider": "Women's Health Center – L&D",
+        "provider_in_network": True,
+        "procedure": "Vaginal Delivery with Epidural – Term",
+        "procedure_key": "delivery_maternity",
+        "diagnosis": "Term delivery – 39 weeks, spontaneous labor, uncomplicated",
+        "icd10": ["O80", "Z37.0"],
+        "billed_amount": 12500.00,
+        "approved_amount": 9800.00,
+        "member_avg_cost": 1200.00,
+        "diagnosis_risk_score": 0.10,
+        "provider_reliability_score": 0.96,
+        "procedure_code_valid": True,
+        "description": "Uncomplicated vaginal delivery at 39 weeks – epidural anesthesia, 2-day stay",
         "status": "pending",
     },
 }

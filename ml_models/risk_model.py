@@ -1,10 +1,15 @@
 import numpy as np
-from typing import Dict, Tuple
+import random as _random
+from typing import Dict, Optional, Tuple
 
 class ClaimRiskModel:
     """
     Simulates an XGBoost/Random Forest model that predicts claim risk.
     In production, this would be a trained model loaded from disk.
+
+    Stress-test mode: pass force_score=<float 0-1> to bypass the feature
+    computation and return an externally-supplied random score. This lets
+    the stress test control the ML decision without changing claim data.
     """
     
     def __init__(self):
@@ -16,12 +21,25 @@ class ClaimRiskModel:
             'procedure_match': 0.05
         }
     
-    def predict(self, claim_data: Dict) -> Tuple[float, Dict]:
+    def predict(self, claim_data: Dict, force_score: Optional[float] = None) -> Tuple[float, Dict]:
         """
-        Returns (risk_score, feature_importance)
-        risk_score: 0.0 (low risk) to 1.0 (high risk)
+        Returns (risk_score, feature_importance).
+        risk_score: 0.0 (low risk) to 1.0 (high risk).
+
+        If force_score is provided (stress-test / random-XGBoost mode):
+          - risk_score = force_score (random 0-1 injected externally)
+          - feature_importance values are proportionally scaled
+          - Simulates XGBoost returning a random prediction
         """
-        
+        if force_score is not None:
+            # Stress-test mode: XGBoost simulator returns the injected random value.
+            # Scale feature importances proportionally so callers still get a dict.
+            risk_score = max(0.0, min(1.0, float(force_score)))
+            feature_importance = {
+                k: risk_score * v for k, v in self.feature_weights.items()
+            }
+            return risk_score, feature_importance
+
         billed = claim_data['billed_amount']
         approved = claim_data['approved_amount']
         member_avg = claim_data['member_avg_cost']
